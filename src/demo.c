@@ -34,8 +34,9 @@ int main(int argc, char **argv) {
         fclose(src_file);
 
         BufferData dst_buf;
+        dst_buf.size = 0;
         TranscodingArgs args;
-        args.bit_rate = 32000;
+        args.bit_rate = 0;
 
         int i = 0;
         int dot = 0;
@@ -51,13 +52,14 @@ int main(int argc, char **argv) {
         strncpy(format_name, argv[2] + dot + 1, 31);
         args.format_name = format_name;
 
-        int out_bit_rate; 
+        int out_bit_rate;
         float out_duration;
         transcoding(&dst_buf, &out_bit_rate, &out_duration, args, src_buf);
 
         printf("out format: \"%s\"\n", format_name);
         printf("out bit rate: %d\n", out_bit_rate);
         printf("out duration: %f\n", out_duration);
+        printf("out size: %i\n", (int)dst_buf.size);
 
         FILE *dst_file = fopen(argv[2], "wb");
         fwrite(dst_buf.buf, dst_buf.size, 1, dst_file);

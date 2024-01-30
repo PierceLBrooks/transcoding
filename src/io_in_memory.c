@@ -3,6 +3,8 @@
 #include <libavformat/avio.h>
 #include <libavformat/avformat.h>
 
+#include <stdio.h>
+
 
 int init_io_context_custom(AVFormatContext *fmt_ctx,
                            int buffer_size,
@@ -47,6 +49,7 @@ int init_io_context_default(AVFormatContext *fmt_ctx, int write_flag, BufferIO *
 static int m_read_packet(void *opaque, uint8_t *buf, int buf_size) {
 
     BufferIO *bio = (BufferIO *)opaque;
+    //printf("Read = %i.\n", (int)bio->curr);
     int left_size = (int)(bio->size - bio->curr);
     buf_size = FFMIN(buf_size, left_size);
 
@@ -59,6 +62,7 @@ static int m_read_packet(void *opaque, uint8_t *buf, int buf_size) {
 static int m_write_packet(void *opaque, uint8_t *buf, int buf_size) {
 
     BufferIO *bio = (BufferIO *)opaque;
+    //printf("Write = %i.\n", (int)bio->curr);
 
     if (bio->curr + buf_size > bio->_total) {
 
@@ -70,12 +74,13 @@ static int m_write_packet(void *opaque, uint8_t *buf, int buf_size) {
 
         uint8_t *ptr = (uint8_t *)realloc(bio->buf, new_total);
         if (ptr == NULL) {
-            fprintf(stderr, "Could not alloc memory !");
+            fprintf(stderr, "Could not alloc memory!\n");
             return AVERROR(ENOMEM);
         }
         else {
             bio->buf = ptr;
             bio->_total = new_total;
+            //printf("Realloc = %i.\n", (int)new_total);
         }
     }
 
@@ -110,6 +115,7 @@ static int64_t m_seek(void *opaque, int64_t offset, int whence) {
     }
 
     bio->curr = FFMIN(new_pos, bio->size);
+    //printf("Seek = %i.\n", (int)bio->curr);
     
     return bio->curr;
 }

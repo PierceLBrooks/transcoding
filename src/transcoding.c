@@ -799,6 +799,11 @@ static int encode_audio_frame(int64_t *pts, AVFrame *frame,
     {
         frame->pts = *pts;
         *pts = *pts + frame->nb_samples;
+        //printf("PTS = %i.\n", (int)(*pts));
+    }
+    else
+    {
+        //fprintf(stderr, "No frame?\n");
     }
 
     /*
@@ -985,7 +990,7 @@ int transcoding(BufferData *p_dst_buf, int *out_bit_rate, float *out_duration, c
             if (read_decode_convert_and_store(fifo, input_format_context,
                                               input_codec_context,
                                               output_codec_context,
-                                              resample_context, &finished))
+                                              resample_context, &finished) && !finished)
             {
                 goto cleanup;
             }
@@ -1013,6 +1018,7 @@ int transcoding(BufferData *p_dst_buf, int *out_bit_rate, float *out_duration, c
             */
             if (load_encode_and_write(&pts, fifo, output_format_context, output_codec_context))
             {
+                if (finished) break;
                 goto cleanup;
             }
         }
@@ -1029,16 +1035,16 @@ int transcoding(BufferData *p_dst_buf, int *out_bit_rate, float *out_duration, c
             {
                 if (encode_audio_frame(&pts, NULL, output_format_context, output_codec_context, &data_written))
                 {
-                    goto cleanup;
+                    break;
                 }
             } while (data_written);
 
             break;
         }
         //sleep_ms(10);
-        if (loops++ % 100 == 0) printf("Loops = %i.\n", loops);
+        //if (loops++ % 100 == 0) printf("Loops = %i.\n", loops);
     }
-    sleep_ms(1000);
+    //sleep_ms(1000);
 
     // Write the trailer of the output file container.
     if (write_output_file_trailer(output_format_context))

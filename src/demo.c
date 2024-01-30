@@ -55,6 +55,7 @@ int main(int argc, char **argv) {
         float out_duration;
         transcoding(&dst_buf, &out_bit_rate, &out_duration, args, src_buf);
 
+        printf("out format: \"%s\"\n", format_name);
         printf("out bit rate: %d\n", out_bit_rate);
         printf("out duration: %f\n", out_duration);
 
@@ -62,8 +63,8 @@ int main(int argc, char **argv) {
         fwrite(dst_buf.buf, dst_buf.size, 1, dst_file);
         fclose(dst_file);
 
-        free(src_buf.buf);
-        free(dst_buf.buf);
+        //free(src_buf.buf);
+        //free(dst_buf.buf);
 
         return 0;
     }

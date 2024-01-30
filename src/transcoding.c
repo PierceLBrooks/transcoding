@@ -1,4 +1,10 @@
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#include <unistd.h>
+#endif
 
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
@@ -15,6 +21,157 @@
 
 #include "transcoding.h"
 
+// https://gist.github.com/rafaelglikis/ee7275bf80956a5308af5accb4871135
+void sleep_ms(int milliseconds)
+{
+#ifdef _WIN32
+    Sleep(milliseconds);
+#elif _POSIX_C_SOURCE >= 199309L
+    struct timespec ts;
+    ts.tv_sec = milliseconds / 1000;
+    ts.tv_nsec = (milliseconds % 1000) * 1000000;
+    nanosleep(&ts, NULL);
+#else
+    usleep(milliseconds * 1000);
+#endif
+}
+
+// https://git.ffmpeg.org/gitweb/ffmpeg.git/blob/refs/heads/release/4.4:/libavcodec/encode.c#l416
+#if LIBAVFORMAT_VERSION_INT > AV_VERSION_INT(58, 134, 100)
+static int compat_encode(AVCodecContext *avctx, AVPacket *avpkt,
+                         int *got_packet, const AVFrame *frame)
+{
+    //AVCodecInternal *avci = avctx->internal;
+    //AVPacket user_pkt;
+    int ret;
+
+    *got_packet = 0;
+
+    if (frame && avctx->codec->type == AVMEDIA_TYPE_VIDEO) {
+        if (frame->format == AV_PIX_FMT_NONE)
+            av_log(avctx, AV_LOG_WARNING, "AVFrame.format is not set\n");
+        if (frame->width == 0 || frame->height == 0)
+            av_log(avctx, AV_LOG_WARNING, "AVFrame.width or height is not set\n");
+    }
+
+    /*if (avctx->codec->capabilities & AV_CODEC_CAP_DR1) {
+        av_log(avctx, AV_LOG_WARNING, "The deprecated avcodec_encode_* API does not support "
+                                      "AV_CODEC_CAP_DR1 encoders\n");
+        return AVERROR(ENOSYS);
+    }*/
+
+#if 0
+    ret = avcodec_send_frame(avctx, frame);
+    if (ret == AVERROR_EOF)
+        ret = 0;
+    else if (ret == AVERROR(EAGAIN)) {
+        /* we fully drain all the output in each encode call, so this should not
+         * ever happen */
+        return AVERROR_BUG;
+    } else if (ret < 0)
+        return ret;
+
+    av_packet_move_ref(&user_pkt, avpkt);
+    while (ret >= 0) {
+        ret = avcodec_receive_packet(avctx, avpkt);
+        if (ret < 0) {
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                ret = 0;
+            goto finish;
+        }
+
+        if (avpkt != avci->compat_encode_packet) {
+            if (avpkt->data && user_pkt.data) {
+                if (user_pkt.size >= avpkt->size) {
+                    memcpy(user_pkt.data, avpkt->data, avpkt->size);
+                    av_buffer_unref(&avpkt->buf);
+                    avpkt->buf  = user_pkt.buf;
+                    avpkt->data = user_pkt.data;
+                    av_init_packet(&user_pkt);
+                } else {
+                    av_log(avctx, AV_LOG_ERROR, "Provided packet is too small, needs to be %d\n", avpkt->size);
+                    av_packet_unref(avpkt);
+                    ret = AVERROR(EINVAL);
+                    goto finish;
+                }
+            }
+
+            *got_packet = 1;
+            avpkt = avci->compat_encode_packet;
+        } else {
+            if (!avci->compat_decode_warned) {
+                av_log(avctx, AV_LOG_WARNING, "The deprecated avcodec_encode_* "
+                       "API cannot return all the packets for this encoder. "
+                       "Some packets will be dropped. Update your code to the "
+                       "new encoding API to fix this.\n");
+                avci->compat_decode_warned = 1;
+                av_packet_unref(avpkt);
+            }
+        }
+
+        if (avci->draining)
+            break;
+    }
+#else
+    ret = avcodec_send_frame(avctx, frame);
+    if (ret < 0)
+    {
+        fprintf(stderr, "Could not send frame @ \"%s\".\n", av_err2str(ret));
+        return ret;
+    }
+    while (ret >= 0)
+    {
+        ret = avcodec_receive_packet(avctx, avpkt);
+        if (ret == 0)
+        {
+            *got_packet = 1;
+            break;
+        }
+        else
+        {
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            {
+                ret = 0;
+                break;
+            }
+            else
+            {
+                return ret;
+            }
+        }
+    }
+#endif
+
+finish:
+    return ret;
+}
+
+int avcodec_encode_audio2(AVCodecContext *avctx,
+                                              AVPacket *avpkt,
+                                              const AVFrame *frame,
+                                              int *got_packet_ptr)
+{
+    int ret = compat_encode(avctx, avpkt, got_packet_ptr, frame);
+
+    if (ret < 0)
+        av_packet_unref(avpkt);
+
+    return ret;
+}
+
+int avcodec_encode_video2(AVCodecContext *avctx,
+                                              AVPacket *avpkt,
+                                              const AVFrame *frame,
+                                              int *got_packet_ptr)
+{
+    int ret = compat_encode(avctx, avpkt, got_packet_ptr, frame);
+
+    if (ret < 0)
+        av_packet_unref(avpkt);
+
+    return ret;
+}
+#endif
 
 // Open input stream and the required decoder.
 static int open_input_stream(const BufferData src,
@@ -42,7 +199,7 @@ static int open_input_stream(const BufferData src,
 
     if ((error = init_io_context_default(*input_format_context, 0, bio)) != 0)
     {
-        fprintf(stderr, "Could not init IO context.\n");
+        fprintf(stderr, "Could not init IO context @ \"%s\".\n", av_err2str(error));
         avformat_close_input(input_format_context);
         *input_format_context = NULL;
         return error;
@@ -50,14 +207,14 @@ static int open_input_stream(const BufferData src,
 
     if ((error = avformat_open_input(input_format_context, NULL, NULL, NULL)) < 0)
     {
-        fprintf(stderr, "Could not open input stream.\n");
+        fprintf(stderr, "Could not open input stream @ \"%s\".\n", av_err2str(error));
         *input_format_context = NULL;
         return error;
     }
 
     if ((error = avformat_find_stream_info(*input_format_context, NULL)) < 0)
     {
-        fprintf(stderr, "Could not open find stream info.\n");
+        fprintf(stderr, "Could not open find stream info @ \"%s\".\n", av_err2str(error));
         avformat_close_input(input_format_context);
         return error;
     }
@@ -106,7 +263,7 @@ static int open_input_stream(const BufferData src,
 
     if ((error = avcodec_open2(avctx, input_codec, NULL)) < 0)
     {
-        fprintf(stderr, "Could not open input codec.\n");
+        fprintf(stderr, "Could not open input codec @ \"%s\".\n", av_err2str(error));
         avcodec_free_context(&avctx);
         avformat_close_input(input_format_context);
         return error;
@@ -132,22 +289,22 @@ static int open_output_stream(const TranscodingArgs args, BufferIO * bio,
     // Create a new format context for the output container format.
     char outname[16] = "o.";
     av_strlcpy(outname+2, args.format_name, 14);
-    if ( (error = avformat_alloc_output_context2(output_format_context, NULL, NULL, outname)) < 0)
+    if ( (error = avformat_alloc_output_context2(output_format_context, NULL, args.format_name, outname)) < 0)
     {
-        fprintf(stderr, "Could not allocate output format context.\n");
+        fprintf(stderr, "Could not allocate output format context @ \"%s\".\n", av_err2str(error));
         return error;
     }
 
     if ( (error = init_io_context_default(*output_format_context, 1, bio)) != 0 )
     {
-        fprintf(stderr, "Could not init output format context.\n");
+        fprintf(stderr, "Could not init output format context @ \"%s\".\n", av_err2str(error));
         avformat_free_context(*output_format_context);
         *output_format_context = NULL;
         return error;
     }
 
     // Find the encoder to be used by its name.
-    encoder_id = av_guess_codec((*output_format_context)->oformat, NULL, NULL, NULL, AVMEDIA_TYPE_AUDIO);
+    encoder_id = av_guess_codec((*output_format_context)->oformat, args.format_name, NULL, NULL, AVMEDIA_TYPE_AUDIO);
     if (!(output_codec = avcodec_find_encoder(encoder_id)))
     {
         fprintf(stderr, "Could not find encoder.\n");
@@ -203,13 +360,13 @@ static int open_output_stream(const TranscodingArgs args, BufferIO * bio,
     // Open the encoder for the audio stream to use it later.
     if ((error = avcodec_open2(avctx, output_codec, NULL)) < 0)
     {
-        fprintf(stderr, "Could not open output codec.\n");
+        fprintf(stderr, "Could not open output codec @ \"%s\".\n", av_err2str(error));
         goto cleanup;
     }
 
     if ((error = avcodec_parameters_from_context(stream->codecpar, avctx)) < 0)
     {
-        fprintf(stderr, "Could not initialize stream parameters.\n");
+        fprintf(stderr, "Could not initialize stream parameters @ \"%s\".\n", av_err2str(error));
         goto cleanup;
     }
 
@@ -285,7 +442,7 @@ static int init_resampler(AVCodecContext *input_codec_context,
     // Open the resampler with the specified parameters.
     if ((error = swr_init(*resample_context)) < 0)
     {
-        fprintf(stderr, "Could not open resample context.\n");
+        fprintf(stderr, "Could not open resample context @ \"%s\".\n", av_err2str(error));
         swr_free(resample_context);
         return error;
     }
@@ -310,7 +467,7 @@ static int write_output_file_header(AVFormatContext *output_format_context)
     int error;
     if ((error = avformat_write_header(output_format_context, NULL)) < 0)
     {
-        fprintf(stderr, "Could not write output file header.\n");
+        fprintf(stderr, "Could not write output file header @ \"%s\".\n", av_err2str(error));
         return error;
     }
     return 0;
@@ -337,7 +494,7 @@ static int decode_audio_frame(AVFrame *frame,
         }
         else
         {
-            fprintf(stderr, "Could not read frame.\n");
+            fprintf(stderr, "Could not read frame @ \"%s\".\n", av_err2str(error));
             return error;
         }
     }
@@ -348,9 +505,40 @@ static int decode_audio_frame(AVFrame *frame,
      If we are at the end of the file, pass an empty packet to the decoder
      to flush it.
      */
-    if ((error = avcodec_decode_audio4(input_codec_context, frame, data_present, &input_packet)) < 0)
+#if LIBAVFORMAT_VERSION_INT < AV_VERSION_INT(58, 134, 100)
+    error = avcodec_decode_audio4(input_codec_context, frame, data_present, &input_packet);
+#else
+    error = avcodec_send_packet(input_codec_context, &input_packet);
+    if (error < 0)
     {
-        fprintf(stderr, "Could not decode frame.\n");
+        av_packet_unref(&input_packet);
+        fprintf(stderr, "Could not send packet @ \"%s\".\n", av_err2str(error));
+        return error;
+    }
+    for (;;)
+    {
+        error = avcodec_receive_frame(input_codec_context, frame);
+        if (error == 0)
+        {
+            *data_present = 1;
+            break;
+        }
+        else
+        {
+            if (error == AVERROR(EAGAIN))
+            {
+                break;
+            }
+            else
+            {
+                return error;
+            }
+        }
+    }
+#endif
+    if (error < 0)
+    {
+        fprintf(stderr, "Could not decode frame @ \"%s\".\n", av_err2str(error));
         av_packet_unref(&input_packet);
         return error;
     }
@@ -399,7 +587,7 @@ static int init_converted_samples(uint8_t ***converted_input_samples,
                                   output_codec_context->sample_fmt, 0)) < 0)
     {
 
-        fprintf(stderr, "Could not allocate converted input samples.\n");
+        fprintf(stderr, "Could not allocate converted input samples @ \"%s\".\n", av_err2str(error));
         av_freep(&(*converted_input_samples)[0]);
         free(*converted_input_samples);
 
@@ -428,7 +616,7 @@ static int convert_samples(const uint8_t **input_data,
                              converted_data, frame_size,
                              input_data    , frame_size)) < 0)
     {
-        fprintf(stderr, "Could not convert input samples.\n");
+        fprintf(stderr, "Could not convert input samples @ \"%s\".\n", av_err2str(error));
         return error;
     }
     else
@@ -450,7 +638,7 @@ static int add_samples_to_fifo(AVAudioFifo *fifo,
      */
     if ((error = av_audio_fifo_realloc(fifo, av_audio_fifo_size(fifo) + frame_size)) < 0)
     {
-        fprintf(stderr, "Could not reallocate FIFO.\n");
+        fprintf(stderr, "Could not reallocate FIFO @ \"%s\".\n", av_err2str(error));
         return error;
     }
 
@@ -584,7 +772,7 @@ static int init_output_frame(AVFrame **frame,
     if ((error = av_frame_get_buffer(*frame, 0)) < 0)
     {
 
-        fprintf(stderr, "Could allocate output frame samples.\n");
+        fprintf(stderr, "Could not allocate output frame samples @ \"%s\".\n", av_err2str(error));
         av_frame_free(frame);
 
         return error;
@@ -617,10 +805,11 @@ static int encode_audio_frame(int64_t *pts, AVFrame *frame,
      Encode the audio frame and store it in the temporary packet.
      The output audio stream encoder is used to do this.
      */
-    if ((error = avcodec_encode_audio2(output_codec_context, &output_packet, frame, data_present)) < 0)
+    error = avcodec_encode_audio2(output_codec_context, &output_packet, frame, data_present);
+    if (error < 0)
     {
 
-        fprintf(stderr, "Could not encode frame.\n");
+        fprintf(stderr, "Could not encode frame @ \"%s\".\n", av_err2str(error));
         av_packet_unref(&output_packet);
 
         return error;
@@ -632,7 +821,7 @@ static int encode_audio_frame(int64_t *pts, AVFrame *frame,
 
         if ((error = av_write_frame(output_format_context, &output_packet)) < 0)
         {
-            fprintf(stderr, "Could not write frame.\n");
+            fprintf(stderr, "Could not write frame @ \"%s\".\n", av_err2str(error));
             av_packet_unref(&output_packet);
 
             return error;
@@ -694,7 +883,7 @@ static int write_output_file_trailer(AVFormatContext *output_format_context)
 
     if ((error = av_write_trailer(output_format_context)) < 0)
     {
-        fprintf(stderr, "Could not write output file trailer.\n");
+        fprintf(stderr, "Could not write output file trailer @ \"%s\".\n", av_err2str(error));
         return error;
     }
     else
@@ -705,7 +894,7 @@ static int write_output_file_trailer(AVFormatContext *output_format_context)
 
 int transcoding(BufferData *p_dst_buf, int *out_bit_rate, float *out_duration, const TranscodingArgs args, const BufferData src_buf)
 {
-
+    int loops = 0;
     int ret = AVERROR(AVERROR_EXIT);
     AVFormatContext *input_format_context = NULL, *output_format_context = NULL;
     AVCodecContext  *input_codec_context = NULL,  *output_codec_context = NULL;
@@ -713,7 +902,9 @@ int transcoding(BufferData *p_dst_buf, int *out_bit_rate, float *out_duration, c
     AVAudioFifo     *fifo = NULL;
     int64_t pts = 0; // Global timestamp for the audio frames
 
+#if LIBAVFORMAT_VERSION_INT < AV_VERSION_INT(58, 134, 100)
     av_register_all();
+#endif
 
     if (open_input_stream(src_buf, &input_format_context, &input_codec_context))
     {
@@ -772,7 +963,7 @@ int transcoding(BufferData *p_dst_buf, int *out_bit_rate, float *out_duration, c
      Loop as long as we have input samples to read or
      output samples to write; abort as soon as we have neither.
      */
-    while (1)
+    for (;;)
     {
         // Use the encoder's desired frame size for processing.
         const int output_frame_size = output_codec_context->frame_size;
@@ -844,7 +1035,10 @@ int transcoding(BufferData *p_dst_buf, int *out_bit_rate, float *out_duration, c
 
             break;
         }
+        //sleep_ms(10);
+        if (loops++ % 100 == 0) printf("Loops = %i.\n", loops);
     }
+    sleep_ms(1000);
 
     // Write the trailer of the output file container.
     if (write_output_file_trailer(output_format_context))
